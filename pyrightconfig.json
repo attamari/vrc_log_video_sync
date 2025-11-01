@@ -1,0 +1,51 @@
+{
+    "pythonVersion": "3.13",
+    "typeCheckingMode": "standard",
+    "useLibraryCodeForTypes": true,
+    // --- 重大な型不一致はエラー ---
+    "reportArgumentType": "error",
+    "reportReturnType": "error",
+    "reportAssignmentType": "error",
+    "reportOperatorIssue": "error",
+    "reportCallIssue": "error",
+    "reportIndexIssue": "error",
+    // --- Unknown/Optional ノイズ抑制（当面） ---
+    "reportUnknownParameterType": "none",
+    "reportUnknownVariableType": "none",
+    "reportUnknownMemberType": "none",
+    "reportUnknownArgumentType": "none",
+    "reportUnknownLambdaType": "none",
+    "reportMissingTypeStubs": "none",
+    "reportMissingTypeArgument": "none",
+    "reportMissingParameterType": "none",
+    "reportOptionalMemberAccess": "none",
+    "reportOptionalSubscript": "none",
+    "reportOptionalCall": "none",
+    "reportOptionalIterable": "none",
+    "reportOptionalContextManager": "none",
+    "reportOptionalOperand": "none",
+    // --- Ruff に移譲 ---
+    "reportUnusedVariable": "none",
+    "reportUnusedImport": "none",
+    "reportUnnecessaryTypeIgnoreComment": "warning",
+    "exclude": [
+        "**/build/**",
+        "**/dist/**",
+        "**/.venv/**",
+        "**/migrations/**",
+        "**/__pycache__/**",
+        "**/.pytest_cache/**",
+        "**/.ruff_cache/**",
+        "**/.mypy_cache/**",
+        "**/.tox/**",
+        "**/.nox/**"
+    ],
+    "executionEnvironments": [
+        {
+            "root": ".",
+            "extraPaths": [
+                "./src"
+            ]
+        }
+    ]
+}

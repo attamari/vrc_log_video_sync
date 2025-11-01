@@ -1,0 +1,19 @@
+name: vrc-log-video-sync
+
+services:
+  app:
+    build:
+      context: .
+      target: runtime
+    image: vrc-log-video-sync:local
+    ports:
+      - "${PORT:-7957}:7957"
+    volumes:
+      - type: bind
+        # If VRCHAT_LOG_DIR is not set, fall back to the current Windows user's VRChat log dir.
+        # Docker Desktop expands ${USERPROFILE} from the host environment.
+        source: ${VRCHAT_LOG_DIR:-${USERPROFILE}\AppData\LocalLow\VRChat\VRChat}
+        target: /vrchat-logs
+        read_only: true
+    restart: unless-stopped
+    # Healthcheck is defined in Dockerfile
