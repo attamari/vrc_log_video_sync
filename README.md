@@ -27,7 +27,7 @@ VRChat上でエラーが発生して読み込めない動画でも、ログフ�
 GitHub 上のリポジトリから直接実行します。
 
 ```
-uvx --python 3.13 --from gh:attamari/vrc_log_video_sync@main vrc-log-video-sync --help
+uvx --python 3.13 --from git+https://github.com/attamari/vrc_log_video_sync.git vrc-log-video-sync --help
 ```
 
 ### 2) ローカル（uv）
