@@ -6,18 +6,37 @@ VRChat のログ (`output_log_*.txt`) をリアルタイムで監視し、再生
 
 ## 使い方
 
+### ダウンロード
+Releasesからダウンロードしてください。  
+https://github.com/attamari/vrc_log_video_sync/releases
+
 ### 配布バイナリから実行
-1. フォルダー `dist\vrc-log-video-sync` に移動します。
-2. 以下のいずれかで実行します。
-   - 自動で最新ログを追尾: `vrc-log-video-sync.exe`
-   - ログディレクトリを指定: `vrc-log-video-sync.exe --log-dir "%USERPROFILE%\AppData\LocalLow\VRChat\VRChat"`
-3. ブラウザで `http://127.0.0.1:7957/client` を開きます。
+1. フォルダー `vrc-log-video-sync` に移動します。
+2. `vrc-log-video-sync.exe`を実行します。
+3. ブラウザが自動で開きます。
+4. VRChat上で動画が再生されると、ブラウザ上で動画が同期再生されます。
 
 ### Python から実行
 ```bash
-uv run python -m vrc_log_video_sync --log-dir "%USERPROFILE%\AppData\LocalLow\VRChat\VRChat"
+uv run python -m vrc_log_video_sync
 ```
 `uv` を使用しない場合は、仮想環境を有効化したうえで `python -m vrc_log_video_sync` を実行してください。
+
+
+## トラブルシューティング
+- 正しく再生されない
+  - VRChat を一度起動してから、アプリケーションを起動してください。
+  - ログの出力をオンにしてください。
+    - 設定 > デバッグ情報 > ログの出力：完全
+  - VRChatが複数起動していないか確認してください。
+- ブラウザの動画が更新されない
+  - アプリケーションが多重起動していないか確認してください。
+- 再生が開始しない
+  - 他のウェブサイトでの再生が無効化されている
+    - 投稿者が再生を無効化しています。Youtubeで見るをクリックしてください。
+  - 非対応の動画サービスである
+    - Youtube以外に対応していません。
+
 
 ---
 
@@ -34,14 +53,8 @@ uv run python -m vrc_log_video_sync --log-dir "%USERPROFILE%\AppData\LocalLow\VR
 
 ---
 
-## API エンドポイント
-- UI: `GET /client`
-- 状態取得: `GET /state?fudge=<秒>` （既定 1.5 秒、推定再生位置の補正に使用）
-
----
-
 ## ビルド手順
-MSVC onedir でスタンドアロンバイナリを作成します。
+MSVCでスタンドアロンバイナリを作成します。
 
 ### 前提
 - Windows 10/11 (x64)
@@ -61,15 +74,8 @@ pwsh -File scripts/build.ps1 -UseIcon -SelfSign
 
 ---
 
-## トラブルシューティング
-- ログが追尾されない場合は VRChat を一度起動し、`--log-dir` または `--log-file` を指定してください。
-- ブラウザ UI の状態が更新されない場合は `/state` の `source`, `video_id`, `status` を確認してください。
-- YouTube IFrame の再生が開始しない場合は、ブラウザのネットワーク設定や拡張機能を確認してください。
-
----
 
 ## ディレクトリ構成
 - `src/vrc_log_video_sync/__main__.py` … メインスクリプト
 - `scripts/build.ps1` … ビルドスクリプト
-- `scripts/convert_icon.py` … `icon.png` を `icon.ico` へ変換
 - `dist/vrc-log-video-sync/` … ビルド成果物
