@@ -1,14 +1,19 @@
 import argparse
+import contextlib
 import datetime as dt
-import glob
 import json
 import os
 import re
+import sys
 import threading
 import time
+import webbrowser
+from collections.abc import Iterator
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any, TextIO
 from urllib.parse import parse_qs, urlparse
 
 CLIENT_HTML = r"""
@@ -211,117 +216,127 @@ class PlayState:
         }
 
 
-STATE = PlayState()
-STATE_LOCK = threading.Lock()
+class StateManager:
+    def __init__(self) -> None:
+        self._state = PlayState()
+        self._lock = threading.Lock()
 
+    def snapshot(self, fudge: float) -> dict:
+        with self._lock:
+            return self._state.to_dict(fudge)
 
-def on_attempt(ts: float, url: str) -> None:
-    with STATE_LOCK:
-        STATE.source = "youtube" if extract_youtube_id(url) else "other"
-        STATE.pending_id = extract_youtube_id(url)
-        STATE.pending_url = url
-        STATE.last_event_epoch = ts
-        STATE.last_event_text = "Attempting"
-        if STATE.pending_id and STATE.pending_id != STATE.video_id:
-            STATE.accepted_zero_start = False
-            STATE.duration_sec = None
-        STATE.status = "loading"
+    def on_attempt(self, ts: float, url: str) -> None:
+        vid = extract_youtube_id(url)
+        with self._lock:
+            state = self._state
+            state.source = "youtube" if vid else "other"
+            state.pending_id = vid
+            state.pending_url = url
+            state.last_event_epoch = ts
+            state.last_event_text = "Attempting"
+            if vid and vid != state.video_id:
+                state.accepted_zero_start = False
+                state.duration_sec = None
+            state.status = "loading"
 
-
-def on_resolved(ts: float, url: str, resolved: str) -> None:
-    with STATE_LOCK:
+    def on_resolved(self, ts: float, url: str, resolved: str) -> None:
         pid = extract_youtube_id(url)
-        STATE.pending_id = pid or STATE.pending_id
-        STATE.pending_url = url  # ensure we remember the original watch URL even if Attempting was missing
-        if pid:
-            STATE.source = "youtube"  # Unity Video Player path may skip Attempting; set source here
-        STATE.resolved_url = resolved
-        d = parse_duration_in_line(resolved)
-        if d:
-            STATE.duration_sec = d
-        # Unity Video Player minimal fix: commit video_id at resolve time as well
-        if STATE.pending_id and (STATE.video_id != STATE.pending_id):
-            STATE.video_id = STATE.pending_id
-            STATE.watch_url = ensure_watch_url(STATE.pending_url or STATE.original_url)
-        STATE.last_event_epoch = ts
-        STATE.last_event_text = "Resolved"
-        STATE.status = "loading"
+        duration = parse_duration_in_line(resolved)
+        with self._lock:
+            state = self._state
+            state.pending_id = pid or state.pending_id
+            state.pending_url = url
+            if pid:
+                state.source = "youtube"
+            state.resolved_url = resolved
+            if duration:
+                state.duration_sec = duration
+            if state.pending_id and (state.video_id != state.pending_id):
+                state.video_id = state.pending_id
+                state.watch_url = ensure_watch_url(state.pending_url or state.original_url)
+            state.last_event_epoch = ts
+            state.last_event_text = "Resolved"
+            state.status = "loading"
+
+    def on_opening(self, ts: float, url: str, offset: float | None) -> None:
+        duration = parse_duration_in_line(url)
+        off = float(offset) if offset is not None else 0.0
+        with self._lock:
+            state = self._state
+            vid_changed = state.pending_id and state.pending_id != state.video_id
+            if vid_changed:
+                state.video_id = state.pending_id
+                state.watch_url = ensure_watch_url(state.pending_url or state.original_url)
+                state.accepted_zero_start = False
+            if state.video_id is None and state.pending_id:
+                state.video_id = state.pending_id
+                state.watch_url = ensure_watch_url(state.pending_url or state.original_url)
+            if off <= 0.05:
+                if not state.accepted_zero_start:
+                    state.started_epoch = ts
+                    state.accepted_zero_start = True
+                    state.status = "playing"
+            else:
+                state.started_epoch = ts - off
+                state.status = "playing"
+            if state.duration_sec is None and duration:
+                state.duration_sec = duration
+            state.last_event_epoch = ts
+            state.last_event_text = f"Opening offset={int(off)}"
+
+    def on_error(self, ts: float, text: str) -> None:
+        with self._lock:
+            state = self._state
+            state.status = "error"
+            state.last_event_epoch = ts
+            state.last_event_text = text
+
+    def on_stop(self, ts: float) -> None:
+        with self._lock:
+            state = self._state
+            state.status = "idle"
+            state.started_epoch = None
+            state.last_event_epoch = ts
+            state.last_event_text = "Stop"
+
+    def remember_duration(self, duration: float | None) -> None:
+        if duration is None:
+            return
+        with self._lock:
+            state = self._state
+            if state.duration_sec is None:
+                state.duration_sec = duration
 
 
-def on_opening(ts: float, url: str, offset: float | None) -> None:
-    off = float(offset) if offset is not None else 0.0
-    with STATE_LOCK:
-        vid_changed = STATE.pending_id and STATE.pending_id != STATE.video_id
-        if vid_changed:
-            STATE.video_id = STATE.pending_id
-            STATE.watch_url = ensure_watch_url(STATE.pending_url or STATE.original_url)
-            STATE.accepted_zero_start = False
-        if STATE.video_id is None and STATE.pending_id:
-            STATE.video_id = STATE.pending_id
-            STATE.watch_url = ensure_watch_url(STATE.pending_url or STATE.original_url)
-        if off <= 0.05:
-            # Accept only the very first zero-start to avoid reset loops.
-            if not STATE.accepted_zero_start:
-                STATE.started_epoch = ts
-                STATE.accepted_zero_start = True
-                STATE.status = "playing"
-        else:
-            STATE.started_epoch = ts - off
-            STATE.status = "playing"
-        if STATE.duration_sec is None:
-            d = parse_duration_in_line(url)
-            if d:
-                STATE.duration_sec = d
-        STATE.last_event_epoch = ts
-        STATE.last_event_text = f"Opening offset={int(off)}"
-
-
-def on_error(ts: float, text: str) -> None:
-    with STATE_LOCK:
-        # Keep the error status for UI, but the client won't treat it as a hard stop.
-        STATE.status = "error"
-        STATE.last_event_epoch = ts
-        STATE.last_event_text = text
-
-
-def on_stop(ts: float) -> None:
-    with STATE_LOCK:
-        STATE.status = "idle"
-        STATE.started_epoch = None
-        STATE.last_event_epoch = ts
-        STATE.last_event_text = "Stop"
+STATE = StateManager()
 
 
 def parse_line(line: str) -> None:
     ts = parse_log_ts(line) or time.time()
     m = ATTEMPT.search(line)
     if m:
-        on_attempt(ts, m.group("url"))
+        STATE.on_attempt(ts, m.group("url"))
         return
     m = RESOLVED.search(line)
     if m:
-        on_resolved(ts, m.group("url"), m.group("resolved"))
+        STATE.on_resolved(ts, m.group("url"), m.group("resolved"))
         return
     m = AVPRO_OPEN.search(line)
     if m:
         off = float(m.group("offset")) if m.group("offset") else 0.0
-        on_opening(ts, m.group("url"), off)
+        STATE.on_opening(ts, m.group("url"), off)
         return
     # Unity Video Player explicit stop event
     if "Send Event _OnStop" in line:
-        on_stop(ts)
+        STATE.on_stop(ts)
         return
     if GENERIC_STOP.search(line):
-        on_stop(ts)
+        STATE.on_stop(ts)
         return
     if GENERIC_ERR.search(line):
-        on_error(ts, "Video error")
+        STATE.on_error(ts, "Video error")
         return
-    d = parse_duration_in_line(line)
-    if d:
-        with STATE_LOCK:
-            if STATE.duration_sec is None:
-                STATE.duration_sec = d
+    STATE.remember_duration(parse_duration_in_line(line))
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -343,8 +358,7 @@ class Handler(BaseHTTPRequestHandler):
                     fudge = float(qs["fudge"][0])
             except Exception:
                 pass
-            with STATE_LOCK:
-                payload = STATE.to_dict(fudge)
+            payload = STATE.snapshot(fudge)
             blob = json.dumps(payload).encode("utf-8")
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -355,25 +369,28 @@ class Handler(BaseHTTPRequestHandler):
             return
         self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
 
-    def log_message(self, fmt, *args):
+    def log_message(self, format: str, *args: Any) -> None:
+        del format, args
         return
 
 
-def find_latest_log_in_dir(log_dir: str) -> str | None:
-    candidates = sorted(glob.glob(os.path.join(log_dir, "output_log_*.txt")))
+def find_latest_log_in_dir(log_dir: str | Path) -> Path | None:
+    directory = Path(log_dir)
+    candidates = sorted(directory.glob("output_log_*.txt"))
     return candidates[-1] if candidates else None
 
 
-def tail_follow(path: str):
-    dir_name = os.path.dirname(path) or "."
-    base_glob = os.path.join(dir_name, "output_log_*.txt")
-    file = None
-    current_path = None
+def tail_follow(path: str | Path) -> Iterator[tuple[str, str]]:
+    base_path = Path(path)
+    watch_dir = base_path.parent
+    pattern = "output_log_*.txt"
+    file: TextIO | None = None
+    current_path: Path | None = None
     pos = 0
 
-    def open_latest():
+    def open_latest() -> bool:
         nonlocal file, current_path, pos
-        candidates = sorted(glob.glob(base_glob))
+        candidates = sorted(watch_dir.glob(pattern))
         if not candidates:
             return False
         latest = candidates[-1]
@@ -381,29 +398,34 @@ def tail_follow(path: str):
             if file:
                 file.close()
             current_path = latest
-            file = open(current_path, encoding="utf-8", errors="ignore")
+            file = latest.open(encoding="utf-8", errors="ignore")
             file.seek(0, os.SEEK_END)
             pos = file.tell()
         return True
 
-    while not open_latest():
-        time.sleep(0.5)
-
     while True:
+        if file is None or current_path is None:
+            if not open_latest():
+                time.sleep(0.5)
+            continue
         line = file.readline()
         if not line:
             try:
-                if (
-                    not os.path.exists(current_path)
-                    or os.path.getsize(current_path) < pos
-                ):
-                    open_latest()
+                if not current_path.exists() or current_path.stat().st_size < pos:
+                    file.close()
+                    file = None
+                    current_path = None
+                    continue
+                if open_latest():
+                    continue
             except Exception:
-                open_latest()
+                file = None
+                current_path = None
+                continue
             time.sleep(0.2)
             continue
         pos = file.tell()
-        yield current_path, line.rstrip("\n")
+        yield str(current_path), line.rstrip("\n")
 
 
 def run_server(host: str, port: int):
@@ -412,26 +434,97 @@ def run_server(host: str, port: int):
     return srv
 
 
+def _enable_windows_ansi() -> None:
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        import msvcrt  # noqa: F401  # ensure Windows console present
+
+        kernel32 = ctypes.windll.kernel32
+        h = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+        mode = ctypes.c_uint32()
+        if kernel32.GetConsoleMode(h, ctypes.byref(mode)):
+            enable_virtual_terminal_processing = 0x0004
+            kernel32.SetConsoleMode(h, mode.value | enable_virtual_terminal_processing)
+    except Exception:
+        pass
+
+
+def _fmt_sec(x: float | None) -> str:
+    try:
+        if x is None:
+            return "-"
+        return f"{float(x):.2f}s"
+    except Exception:
+        return "-"
+
+
+def _open_browser(url: str) -> None:
+    with contextlib.suppress(Exception):
+        webbrowser.open(url, new=1, autoraise=True)
+
+
+def run_tui(url: str, refresh_sec: float = 0.5) -> None:
+    _enable_windows_ansi()
+    hint_quit_shown = False
+    while True:
+        s = STATE.snapshot(1.5)
+        try:
+            sys.stdout.write("\x1b[2J\x1b[H")  # clear + home
+        except Exception:
+            print("\n" * 3, end="")
+        print("VRChat Log Video Sync — Console View")
+        print("".ljust(60, "-"))
+        print(f" Source   : {s.get('source') or '-'}")
+        print(f" Video ID : {s.get('video_id') or '-'}")
+        print(f" Position : {_fmt_sec(s.get('estimated_position_sec'))}")
+        print(f" Duration : {_fmt_sec(s.get('duration_sec'))}")
+        print(f" Status   : {s.get('status') or '-'}")
+        print(f" URL      : {s.get('watch_url') or '-'}")
+        print()
+        print(" Keys: [O]pen in browser   [Ctrl+C] Exit")
+        print(f" Open: {url}")
+
+        # lightweight key handling on Windows (optional)
+        if os.name == "nt":
+            try:
+                import msvcrt
+
+                if msvcrt.kbhit():
+                    ch = msvcrt.getwch()
+                    if ch in ("o", "O"):
+                        _open_browser(url)
+                    elif ch in ("q", "Q") and not hint_quit_shown:
+                        print("Press Ctrl+C to exit.")
+                        hint_quit_shown = True
+            except Exception:
+                pass
+        time.sleep(refresh_sec)
+
+
 def run_watch(log_file: str | None, log_dir: str | None, replay: str | None):
     if replay:
-        with open(replay, encoding="utf-8", errors="ignore") as f:
+        with Path(replay).open(encoding="utf-8", errors="ignore") as f:
             for raw in f:
                 line = raw.rstrip("\n")
                 parse_line(line)
                 time.sleep(0.01)
         return
     path = None
-    if log_file and os.path.exists(log_file):
-        path = log_file
+    if log_file and Path(log_file).exists():
+        path = Path(log_file)
     else:
         if not log_dir:
-            home = os.path.expanduser("~")
-            log_dir = os.path.join(home, "AppData", "LocalLow", "VRChat", "VRChat")
-        if not os.path.isdir(log_dir):
-            raise SystemExit(f"Log directory not found: {log_dir}")
-        latest = find_latest_log_in_dir(log_dir)
+            home = Path.home()
+            log_dir_path = home / "AppData" / "LocalLow" / "VRChat" / "VRChat"
+        else:
+            log_dir_path = Path(log_dir)
+        if not log_dir_path.is_dir():
+            raise SystemExit(f"Log directory not found: {log_dir_path}")
+        latest = find_latest_log_in_dir(log_dir_path)
         if not latest:
-            raise SystemExit(f"No output_log_*.txt found in: {log_dir}")
+            raise SystemExit(f"No output_log_*.txt found in: {log_dir_path}")
         path = latest
     print(f"[log] Following: {path}")
     for _, line in tail_follow(path):
@@ -445,13 +538,18 @@ def main():
     ap.add_argument("--port", type=int, default=7957)
     ap.add_argument("--host", type=str, default="127.0.0.1")
     ap.add_argument("--replay", type=str, default=None)
+    ap.add_argument("--no-browser", action="store_true", help="Do not auto open browser UI")
+    ap.add_argument("--no-tui", action="store_true", help="Do not show console TUI")
     _ = ap.parse_args()
-    srv = run_server(_.host, _.port)
-    print(f"[ui] Open: http://{_.host}:{_.port}/client")
-    try:
+    _server = run_server(_.host, _.port)
+    url = f"http://{_.host}:{_.port}/client"
+    print(f"[ui] Open: {url}")
+    if not _.no_browser:
+        threading.Thread(target=_open_browser, args=(url,), daemon=True).start()
+    if not _.no_tui:
+        threading.Thread(target=run_tui, args=(url,), daemon=True).start()
+    with contextlib.suppress(KeyboardInterrupt):
         run_watch(_.log_file, _.log_dir, _.replay)
-    except KeyboardInterrupt:
-        pass
 
 
 if __name__ == "__main__":
